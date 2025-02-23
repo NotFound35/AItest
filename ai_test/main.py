@@ -1,113 +1,206 @@
 import os
-from telethon import TelegramClient, events
-import openai
-import difflib
+import asyncio
 import logging
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
 from dotenv import load_dotenv
+from database import init_db, save_message, get_chat_history, clear_chat_history
+import openai
 
+# Загрузка переменных окружения
 load_dotenv()
-# Ваши данные
-# api_id = '20590033'  # Укажите API_ID
-# api_hash = '3c282ae507c0fbb7e9fcab64222e622e'  # Укажите API_HASH
-# phone_number = '+35795145008'  # Ваш номер телефона в Telegram
-# openai_api_key = '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'  # Ваш API-ключ OpenAI
 
-# Настроим OpenAI API
-openai.api_key = os.getenv('OPENAI_API_KEY')
-api_id = os.getenv('API_ID')
-api_hash = os.getenv('API_HASH')
-# Создание клиента Telegram
-client = TelegramClient('session_name', api_id, api_hash)
-
+# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
-# Пример товаров
-products = {
-    "001": {
-        "name": "Умные часы",
-        "description": "Умные часы с мониторингом здоровья и уведомлениями.",
-        "price": 1999,
-        "image": "https://example.com/smartwatch.jpg",
-        "link": "https://example.com/buy/smartwatch"
-    },
-    "002": {
-        "name": "Беспроводные наушники",
-        "description": "Качественные беспроводные наушники с отличным звуком.",
-        "price": 2999,
-        "image": "https://example.com/headphones.jpg",
-        "link": "https://example.com/buy/headphones"
-    }
-}
+# Токены
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+OPENAI_API_KEY = "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"
+ALLOWED_USERS = set(map(int, os.getenv("ALLOWED_USERS", "").split(",")))
 
-def get_product_recommendations(user_input):
-    recommendations = []
-    for product in products.values():
-        # Поиск по названию и описанию (игнорируем регистр)
-        match_name = difflib.get_close_matches(user_input.lower(), [product["name"].lower()], cutoff=0.5)
-        match_desc = difflib.get_close_matches(user_input.lower(), [product["description"].lower()], cutoff=0.5)
-        
-        if match_name or match_desc:
-            recommendations.append(product)
+# Инициализация бота
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
 
-    return recommendations
+# Инициализация OpenAI
+openai.api_key = OPENAI_API_KEY
 
-async def generate_response(prompt):
-    response = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
-        messages=[{"role": "user", "content": prompt}]
-    )
-    return response['choices'][0]['message']['content']
+# Проверка пользователя
+async def is_allowed_user(user_id):
+    return user_id in ALLOWED_USERS
+
+# Команда старт
+@dp.message(Command("start"))
+async def send_welcome(message: types.Message):
+    await message.reply("🤖 Привет! Я бот-продавец. Начни новый диалог с помощью команды /newchat [название чата].")
+
+# Создание нового чата
+@dp.message(Command("newchat"))
+async def new_chat(message: types.Message):
+    user_id = message.from_user.id
+    chat_name = message.text.split(maxsplit=1)[1] if len(message.text.split()) > 1 else "default"
+    save_message(user_id, chat_name, "system", f"Начат новый чат: {chat_name}")
+    await message.reply(f"✨ Новый чат создан: {chat_name}")
+
+# Обработка сообщений и отправка в GPT
+@dp.message()
+async def chat_with_gpt(message: types.Message):
+    user_id = message.from_user.id
+    chat_name = "default"
+
+    history = get_chat_history(user_id, chat_name)
+    history.append({"role": "user", "content": message.text})
+
+    try:
+        response = await openai.ChatCompletion.acreate(
+            model="gpt-3.5-turbo",
+            messages=history
+        )
+        bot_reply = response['choices'][0]['message']['content']
+
+        save_message(user_id, chat_name, "user", message.text)
+        save_message(user_id, chat_name, "assistant", bot_reply)
+
+    except Exception as e:
+        logging.error(f"Ошибка OpenAI: {e}")
+        bot_reply = "⚠ Произошла ошибка при запросе к нейросети."
+
+    await message.reply(bot_reply)
+
+# Очистка истории
+@dp.message(Command("clear"))
+async def clear_history(message: types.Message):
+    user_id = message.from_user.id
+    chat_name = "default"
+    clear_chat_history(user_id, chat_name)
+    await message.reply("🧹 История чата очищена!")
+
+# Запуск бота
+async def main():
+    init_db()
+    logging.info("Бот запущен")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+
+
+
+# import os
+# from telethon import TelegramClient, events
+# import openai
+# import difflib
+# import logging
+# from dotenv import load_dotenv
+
+# load_dotenv()
+# # Ваши данные
+# # api_id = '20590033'  # Укажите API_ID
+# # api_hash = '3c282ae507c0fbb7e9fcab64222e622e'  # Укажите API_HASH
+# # phone_number = '+35795145008'  # Ваш номер телефона в Telegram
+# # openai_api_key = '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'  # Ваш API-ключ OpenAI
+
+# # Настроим OpenAI API
+# openai.api_key = os.getenv('OPENAI_API_KEY')
+# api_id = os.getenv('API_ID')
+# api_hash = os.getenv('API_HASH')
+# # Создание клиента Telegram
+# client = TelegramClient('session_name', api_id, api_hash)
+
+# logging.basicConfig(
+#     level=logging.INFO,
+#     format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+#     datefmt="%Y-%m-%d %H:%M:%S",
+# )
+
+# # Пример товаров
+# products = {
+#     "001": {
+#         "name": "Умные часы",
+#         "description": "Умные часы с мониторингом здоровья и уведомлениями.",
+#         "price": 1999,
+#         "image": "https://example.com/smartwatch.jpg",
+#         "link": "https://example.com/buy/smartwatch"
+#     },
+#     "002": {
+#         "name": "Беспроводные наушники",
+#         "description": "Качественные беспроводные наушники с отличным звуком.",
+#         "price": 2999,
+#         "image": "https://example.com/headphones.jpg",
+#         "link": "https://example.com/buy/headphones"
+#     }
+# }
 
 # def get_product_recommendations(user_input):
 #     recommendations = []
-#     for product_id, product in products.items():
-#         if product["name"].lower() in user_input.lower() or product["description"].lower() in user_input.lower():
+#     for product in products.values():
+#         # Поиск по названию и описанию (игнорируем регистр)
+#         match_name = difflib.get_close_matches(user_input.lower(), [product["name"].lower()], cutoff=0.5)
+#         match_desc = difflib.get_close_matches(user_input.lower(), [product["description"].lower()], cutoff=0.5)
+        
+#         if match_name or match_desc:
 #             recommendations.append(product)
+
 #     return recommendations
 
-# Фильтр: реагировать только на ЛИЧНЫЕ сообщения
-@client.on(events.NewMessage(func=lambda e: e.is_private))
-async def my_event_handler(event):
+# async def generate_response(prompt):
+#     response = openai.ChatCompletion.create(
+#         model="gpt-3.5-turbo",
+#         messages=[{"role": "user", "content": prompt}]
+#     )
+#     return response['choices'][0]['message']['content']
 
-    me = await client.get_me()
-    if event.message.sender_id == me.id:
-        return
+# # def get_product_recommendations(user_input):
+# #     recommendations = []
+# #     for product_id, product in products.items():
+# #         if product["name"].lower() in user_input.lower() or product["description"].lower() in user_input.lower():
+# #             recommendations.append(product)
+# #     return recommendations
 
-    incoming_message = event.message.message
-    logging.info(f"Получено сообщение: {incoming_message} от пользователя {event.message.sender_id}")
+# # Фильтр: реагировать только на ЛИЧНЫЕ сообщения
+# @client.on(events.NewMessage(func=lambda e: e.is_private))
+# async def my_event_handler(event):
+
+#     me = await client.get_me()
+#     if event.message.sender_id == me.id:
+#         return
+
+#     incoming_message = event.message.message
+#     logging.info(f"Получено сообщение: {incoming_message} от пользователя {event.message.sender_id}")
     
-    # Получить рекомендации
-    recommendations = get_product_recommendations(incoming_message)
-    if recommendations:
-        response = "Вот что я могу вам предложить:\n\n"
-        logging.info(f"Найдено {len(recommendations)} предложений")
-        for product in recommendations:
-            response += f"{product['name']}\n{product['description']}\nЦена: {product['price']} рублей\n" \
-                        f"![Изображение]({product['image']})\n" \
-                        f"[Купить здесь]({product['link']})\n\n"
+#     # Получить рекомендации
+#     recommendations = get_product_recommendations(incoming_message)
+#     if recommendations:
+#         response = "Вот что я могу вам предложить:\n\n"
+#         logging.info(f"Найдено {len(recommendations)} предложений")
+#         for product in recommendations:
+#             response += f"{product['name']}\n{product['description']}\nЦена: {product['price']} рублей\n" \
+#                         f"![Изображение]({product['image']})\n" \
+#                         f"[Купить здесь]({product['link']})\n\n"
             
-            logging.info(f"Отправлено предложение: {product['name']} пользователю {event.message.sender_id}")
-    else:
-        # Если нет предложений, отправляем запрос в AI
-        try:
-            response = await generate_response(incoming_message)
-            logging.info(f"Ответ от OpenAI: {response}")
-        except Exception as e:
-            logging.error(f"Ошибка OpenAI: {e}")
+#             logging.info(f"Отправлено предложение: {product['name']} пользователю {event.message.sender_id}")
+#     else:
+#         # Если нет предложений, отправляем запрос в AI
+#         try:
+#             response = await generate_response(incoming_message)
+#             logging.info(f"Ответ от OpenAI: {response}")
+#         except Exception as e:
+#             logging.error(f"Ошибка OpenAI: {e}")
 
-    await event.reply(response)
+#     await event.reply(response)
 
-async def main():
-    await client.start()
-    logging.info("Бот запущен, ожидаю сообщений...")
-    await client.run_until_disconnected()
+# async def main():
+#     await client.start()
+#     logging.info("Бот запущен, ожидаю сообщений...")
+#     await client.run_until_disconnected()
 
-with client:
-    client.loop.run_until_complete(main())
+# with client:
+#     client.loop.run_until_complete(main())
 
 
 # import os
